@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from gtts import gTTS
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
-from openai import OpenAI
+import openai
 
 # Load environment variables
 load_dotenv()
@@ -18,7 +18,7 @@ BOT_NAME = os.getenv("BOT_NAME", "DevOpsGuru")
 TTS_LANG = os.getenv("TTS_LANG", "hi")
 
 # OpenAI client
-client = OpenAI(api_key=OPENAI_API_KEY)
+openai.api_key = OPENAI_API_KEY
 
 # Logging
 logging.basicConfig(level=logging.INFO)
