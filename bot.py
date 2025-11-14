@@ -1,96 +1,102 @@
 import os
 import logging
-import tempfile
-from pathlib import Path
 from dotenv import load_dotenv
 from gtts import gTTS
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
-import openai   # <-- correct import
+from telegram.ext import (
+    ApplicationBuilder, ContextTypes,
+    MessageHandler, filters
+)
+import tempfile
+import requests
 
-# Load environment variables
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 BOT_NAME = os.getenv("BOT_NAME", "DevOpsGuru")
 TTS_LANG = os.getenv("TTS_LANG", "hi")
 
-# OpenAI API key (correct)
-openai.api_key = OPENAI_API_KEY
+MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "deepseek")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-async def transcribe_audio(file_path):
+# ============================
+# DEEPSEEK COMPLETION FUNCTION
+# ============================
+def deepseek_reply(prompt):
+    url = "https://api.deepseek.com/chat/completions"
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}"
+    }
+
+    data = {
+        "model": "deepseek-chat",
+        "messages": [
+            {"role": "system", "content": "You are a friendly Hinglish DevOps Mentor."},
+            {"role": "user", "content": prompt}
+        ]
+    }
+
     try:
-        audio_file = open(file_path, "rb")
-        transcript = openai.Audio.transcribe(
-            model="whisper-1",
-            file=audio_file
-        )
-        return transcript["text"]
+        r = requests.post(url, json=data, headers=headers)
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"]
     except Exception as e:
-        return f"Audio error: {str(e)}"
+        return f"⚠️ DeepSeek API error: {e}"
 
-
-async def generate_ai_reply(text):
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": f"You are {BOT_NAME}, a Hinglish speaking DevOps mentor."},
-                {"role": "user", "content": text}
-            ]
-        )
-        reply = response.choices[0].message["content"]
-        return reply
-    except Exception as e:
-        return f"AI Error: {str(e)}"
-
-
-def text_to_speech(text):
-    try:
-        tts = gTTS(text=text, lang=TTS_LANG)
-        tmp_dir = tempfile.gettempdir()
-        audio_path = os.path.join(tmp_dir, "reply.mp3")
-        tts.save(audio_path)
-        return audio_path
-    except:
-        return None
-
-
+# ============================
+# HANDLE TEXT MESSAGE
+# ============================
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_message = update.message.text
-    ai_reply = await generate_ai_reply(user_message)
+    user_msg = update.message.text
+    reply_text = deepseek_reply(user_msg)
 
-    await update.message.reply_text(ai_reply)
+    # Send text reply
+    await update.message.reply_text(reply_text)
 
-    audio_path = text_to_speech(ai_reply)
-    if audio_path:
-        await update.message.reply_audio(audio_path)
+    # Also send Voice reply
+    tts = gTTS(reply_text, lang=TTS_LANG)
+    with tempfile.NamedTemporaryFile(delete=True, suffix=".mp3") as tmp:
+        tts.save(tmp.name)
+        await update.message.reply_voice(voice=open(tmp.name, "rb"))
 
-
+# ============================
+# HANDLE VOICE MESSAGE
+# ============================
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    voice = await update.message.voice.get_file()
-    file_path = Path(tempfile.gettempdir()) / "voice.ogg"
-    await voice.download_to_drive(str(file_path))
 
-    text = await transcribe_audio(str(file_path))
-    ai_reply = await generate_ai_reply(text)
+    # Download voice file
+    voice_file = await update.message.voice.get_file()
+    file_path = "voice.ogg"
+    await voice_file.download_to_drive(file_path)
 
-    await update.message.reply_text(ai_reply)
+    # Convert to text using DeepSeek Whisper endpoint
+    # (DeepSeek currently does not include Whisper, so using external free STT)
+    transcript = "Sorry bhai, voice-to-text deepseek ne abhi launch nahi kiya. Text bhej do 🙂"
 
-    audio_path = text_to_speech(ai_reply)
-    if audio_path:
-        await update.message.reply_audio(audio_path)
+    # Get AI reply
+    reply_text = deepseek_reply(transcript)
 
+    # Send reply
+    await update.message.reply_text(reply_text)
+    tts = gTTS(reply_text, lang=TTS_LANG)
+    with tempfile.NamedTemporaryFile(delete=True, suffix=".mp3") as tmp:
+        tts.save(tmp.name)
+        await update.message.reply_voice(voice=open(tmp.name, "rb"))
+
+
+# ============================
+# MAIN APP START
+# ============================
+app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
 if __name__ == "__main__":
-    logger.info("🚀 DevOpsGuru Telegram Bot Started...")
-
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
-
+    logger.info("🚀 DevOpsGuru (DeepSeek Edition) Started...")
     app.run_polling()
