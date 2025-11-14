@@ -1,6 +1,4 @@
-python-telegram-bot==20.6
-openai
+python-telegram-bot==20.3
+gtts==2.3.2
+openai==0.28
 python-dotenv
-gTTS
-pydub
-requests
