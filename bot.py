@@ -1,165 +1,121 @@
 import os
 import tempfile
 import logging
-import subprocess
-from dotenv import load_dotenv
 from pathlib import Path
-import openai
+from dotenv import load_dotenv
+from gtts import gTTS
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
-from gtts import gTTS
+from openai import OpenAI
 
-# Load env
+# Load environment variables
 load_dotenv()
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-BOT_NAME = os.getenv('BOT_NAME', 'DevOpsGuru')
-TTS_LANG = os.getenv('TTS_LANG', 'hi')
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+BOT_NAME = os.getenv("BOT_NAME", "DevOpsGuru")
+TTS_LANG = os.getenv("TTS_LANG", "hi")
 
-openai.api_key = OPENAI_API_KEY
+# OpenAI client
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# Convert ogg voice → mp3 using ffmpeg
-def convert_to_mp3(input_path: str, output_path: str):
-    cmd = [
-        'ffmpeg', '-y', '-i', input_path,
-        '-ar', '16000', '-ac', '1', output_path
-    ]
-    subprocess.run(cmd, check=True)
-
-
-# Transcribe audio using Whisper
-def transcribe_audio(file_path: str) -> str:
-    with open(file_path, 'rb') as f:
-        transcript = openai.audio.transcriptions.create(
+# Transcribe voice using Whisper (OpenAI)
+def transcribe_audio(audio_path):
+    with open(audio_path, "rb") as f:
+        transcript = client.audio.transcriptions.create(
             model="whisper-1",
             file=f
         )
-    return transcript.text if hasattr(transcript, "text") else ""
+    return transcript.text
 
 
-# Generate AI chat response in Hinglish
-def get_chat_response(prompt_text: str, user_name: str = "Student") -> str:
-    system_prompt = (
-        f"You are {BOT_NAME}, a friendly DevOps mentor speaking Hinglish "
-        f"(mix of Hindi & English). Explain concepts simply, give short examples, "
-        f"command snippets, and quizzes when asked."
+# Generate Hinglish AI reply
+def generate_ai_reply(prompt, user_name="Student"):
+    system_message = (
+        f"You are {BOT_NAME}, a friendly DevOps mentor speaking Hinglish. "
+        f"Explain simply, give examples, shortcuts, and DevOps commands."
     )
 
-    response = openai.chat.completions.create(
+    response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"{user_name} asked: {prompt_text}"}
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": prompt}
         ],
         max_tokens=400
     )
 
-    reply = response.choices[0].message["content"]
-    return reply
+    return response.choices[0].message["content"]
 
 
-# Convert text → speech (gTTS → ogg)
-def text_to_speech_and_prepare_ogg(text: str) -> str:
-    with tempfile.TemporaryDirectory() as td:
-        mp3_path = Path(td) / 'speech.mp3'
-        ogg_path = Path(td) / 'speech.ogg'
-
-        # gTTS conversion
-        tts = gTTS(text=text, lang=TTS_LANG)
-        tts.save(str(mp3_path))
-
-        # Convert mp3 → ogg for Telegram
-        cmd = [
-            'ffmpeg', '-y', '-i', str(mp3_path),
-            '-c:a', 'libopus', '-b:a', '64k', str(ogg_path)
-        ]
-        subprocess.run(cmd, check=True)
-
-        # Move to temp
-        final_path = Path(tempfile.gettempdir()) / f"resp_{os.getpid()}.ogg"
-        if final_path.exists():
-            final_path.unlink()
-        final_path.write_bytes(ogg_path.read_bytes())
-
-        return str(final_path)
+# Convert text to mp3 for Telegram
+def text_to_speech(text):
+    tts = gTTS(text=text, lang=TTS_LANG)
+    tmp_path = Path(tempfile.gettempdir()) / f"voice_{os.getpid()}.mp3"
+    tts.save(str(tmp_path))
+    return str(tmp_path)
 
 
-# Handle text input from user
+# Handle text messages
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_name = user.first_name or "Student"
+    user = update.effective_user.first_name or "Student"
     text = update.message.text
 
-    reply = get_chat_response(text, user_name)
-    await update.message.reply_text(reply)
+    reply_text = generate_ai_reply(text, user)
 
+    await update.message.reply_text(reply_text)
+
+    # Send voice reply
     try:
-        voice_path = text_to_speech_and_prepare_ogg(reply)
-        with open(voice_path, 'rb') as f:
-            await update.message.reply_voice(f)
-        os.remove(voice_path)
+        voice_file = text_to_speech(reply_text)
+        await update.message.reply_voice(open(voice_file, "rb"))
+        os.remove(voice_file)
     except Exception as e:
-        logger.error("TTS failed", e)
+        logger.error(f"Voice reply error: {e}")
 
 
 # Handle voice messages
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_name = user.first_name or 'Student'
+    user = update.effective_user.first_name or "Student"
     voice = update.message.voice
 
     if not voice:
-        await update.message.reply_text("Voice message not found.")
-        return
+        return await update.message.reply_text("Voice not found.")
 
     file = await context.bot.get_file(voice.file_id)
+    tmp_dir = tempfile.gettempdir()
+    ogg_path = Path(tmp_dir) / "input.ogg"
 
-    with tempfile.TemporaryDirectory() as td:
-        ogg_path = Path(td) / "input.ogg"
-        mp3_path = Path(td) / "input.mp3"
+    await file.download_to_drive(str(ogg_path))
 
-        await file.download_to_drive(str(ogg_path))
+    # Whisper transcription
+    text = transcribe_audio(str(ogg_path))
+    await update.message.reply_text(f"Transcribed: {text}")
 
-        try:
-            convert_to_mp3(str(ogg_path), str(mp3_path))
-        except Exception as e:
-            logger.exception("ffmpeg conversion failed")
-            await update.message.reply_text("Audio processing error.")
-            return
+    # AI reply
+    reply_text = generate_ai_reply(text, user)
+    await update.message.reply_text(reply_text)
 
-        # Whisper transcription
-        text = transcribe_audio(str(mp3_path))
-        await update.message.reply_text(f"Transcribed: {text}")
-
-        # AI mentor reply
-        reply = get_chat_response(text, user_name)
-        await update.message.reply_text(reply)
-
-        # Voice reply
-        try:
-            voice_path = text_to_speech_and_prepare_ogg(reply)
-            with open(voice_path, 'rb') as f:
-                await update.message.reply_voice(f)
-            os.remove(voice_path)
-        except Exception:
-            await update.message.reply_text("Voice reply failed.")
+    # Voice output
+    voice_path = text_to_speech(reply_text)
+    await update.message.reply_voice(open(voice_path, "rb"))
+    os.remove(voice_path)
 
 
-# Start the bot
+# MAIN BOT STARTER
 if __name__ == "__main__":
     if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
-        print("Missing TELEGRAM_TOKEN or OPENAI_API_KEY in .env")
-        exit()
+        raise ValueError("Missing TELEGRAM_TOKEN or OPENAI_API_KEY")
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
+    # Handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
-    print("DevOpsGuru bot is running...")
+    print("🚀 DevOpsGuruAiBot is running...")
     app.run_polling()
